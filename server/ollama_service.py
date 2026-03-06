@@ -55,6 +55,69 @@ EDA_RESPONSE_SCHEMA = {
     },
 }
 
+CAUSAL_GRAPH_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "insight": {"type": "string"},
+        "suggestedActions": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "edges": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string"},
+                    "to": {"type": "string"},
+                    "type": {"type": "string"}
+                },
+                "required": ["from", "to", "type"]
+            }
+        }
+    },
+    "required": ["title", "insight", "edges"]
+}
+
+IDENTIFICATION_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "insight": {"type": "string"},
+        "formula": {"type": "string"},
+        "adjustmentSet": {"type": "array", "items": {"type": "string"}},
+        "ate": {"type": "number"},
+        "ciLower": {"type": "number"},
+        "ciUpper": {"type": "number"},
+        "method": {"type": "string"},
+        "pValue": {"type": "number"},
+        "heterogeneity": {"type": "string"},
+        "assumptions": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["insight", "formula", "adjustmentSet", "ate", "ciLower", "ciUpper", "method", "pValue"]
+}
+
+OUTLIER_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "insight": {"type": "string"},
+        "suggestedActions": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["insight"]
+}
+
+ACTION_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "insight": {"type": "string"},
+        "result": {"type": "string"},
+        "answer": {"type": "string"},
+        "suggestedActions": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}}
+    }
+}
+
 
 def _extract_json(text: str) -> Any:
     raw = (text or "").strip()
@@ -86,7 +149,9 @@ def _ollama_chat(
 ) -> Any:
     format_value: Any = None
     if expect_json:
-        format_value = response_schema if response_schema else "json"
+        if response_schema is None:
+            raise ValueError("response_schema is required when expect_json=True")
+        format_value = response_schema
 
     messages = [
         {"role": "system", "content": system_instruction},
@@ -255,7 +320,12 @@ def generate_causal_graph(context: str, columns: List[str], roles: Dict[str, str
         Return the list of edges."""
 
     try:
-        response = _ollama_chat(prompt, SYSTEM_INSTRUCTION, expect_json=True)
+        response = _ollama_chat(
+            prompt,
+            SYSTEM_INSTRUCTION,
+            expect_json=True,
+            response_schema=CAUSAL_GRAPH_RESPONSE_SCHEMA,
+        )
         return response if isinstance(response, dict) else {}
     except Exception as e:
         print(f"DAG Error: {e}")
@@ -287,7 +357,12 @@ def generate_identification_strategy(context: str, roles: Dict[str, str], edges:
             Return structured data for visualization."""
 
     try:
-        response = _ollama_chat(prompt, SYSTEM_INSTRUCTION, expect_json=True)
+        response = _ollama_chat(
+            prompt,
+            SYSTEM_INSTRUCTION,
+            expect_json=True,
+            response_schema=IDENTIFICATION_RESPONSE_SCHEMA,
+        )
         return response if isinstance(response, dict) else {}
     except Exception as e:
         print(f"Estimation Error: {e}")
@@ -309,7 +384,12 @@ def explain_outlier(point_data: Any, context: str, lang: str = 'en') -> Dict[str
       """
 
     try:
-        response = _ollama_chat(prompt, SYSTEM_INSTRUCTION, expect_json=True)
+        response = _ollama_chat(
+            prompt,
+            SYSTEM_INSTRUCTION,
+            expect_json=True,
+            response_schema=OUTLIER_RESPONSE_SCHEMA,
+        )
         return response if isinstance(response, dict) else {}
     except Exception as e:
         return {"title": "Error", "insight": "Could not analyze outlier."}
@@ -326,14 +406,21 @@ def perform_suggested_action(context: str, action: str, lang: str = 'en') -> Dic
       """
 
     try:
-        response = _ollama_chat(prompt, SYSTEM_INSTRUCTION, expect_json=True)
+        response = _ollama_chat(
+            prompt,
+            SYSTEM_INSTRUCTION,
+            expect_json=True,
+            response_schema=ACTION_RESPONSE_SCHEMA,
+        )
         return response if isinstance(response, dict) else {}
     except Exception as e:
         return {"title": "Error", "insight": "Could not perform action."}
 
-def analyze_insight(insight_text: str, lang: str = 'en') -> List[str]:
+def analyze_insight(insight_text: str, lang: str = 'en', context: Optional[str] = None) -> List[str]:
+    context_section = f"\nAdditional Context:\n{context}\n" if context else ""
     prompt = f"""The user has written a manual research note or insight:
 \"{insight_text}\"
+{context_section}
 
 Based on this note, suggest 1 to 3 concrete next steps or actions the user should take in their causal analysis workflow.
 Examples of actions: \"Check SUTVA assumption\", \"Fork dataset to focus on low SES\", \"Add a mediator variable\", \"Estimate ATE using Propensity Score Matching\".

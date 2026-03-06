@@ -31,6 +31,11 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
       startX: number;
       startY: number;
   }>({ mode: 'IDLE', startX: 0, startY: 0 });
+  const [connectState, setConnectState] = useState<{
+      sourceId: string;
+      currentX: number;
+      currentY: number;
+  } | null>(null);
   
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -96,7 +101,7 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
   }, []);
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (dragState.mode === 'DRAG_NODE') return;
+    if (dragState.mode === 'DRAG_NODE' || connectState) return;
 
     // Deselect if clicking on background
     if (e.button === 0 && !e.altKey && !isSpacePressed) {
@@ -132,7 +137,9 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (dragState.mode === 'PAN') {
+    if (connectState) {
+        setConnectState(prev => prev ? { ...prev, currentX: e.clientX, currentY: e.clientY } : prev);
+    } else if (dragState.mode === 'PAN') {
         const dx = e.clientX - dragState.startX;
         const dy = e.clientY - dragState.startY;
         setTransform(prev => ({ ...prev, x: prev.x + dx, y: prev.y + dy }));
@@ -150,8 +157,27 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e?: React.MouseEvent) => {
+      if (connectState && onConnect && wrapperRef.current && e) {
+          const targetEl = (e.target as HTMLElement)?.closest?.('[data-node-id]');
+          const targetId = targetEl?.getAttribute('data-node-id');
+          if (targetId && targetId !== connectState.sourceId) {
+              onConnect(connectState.sourceId, targetId);
+          }
+      }
+
+      setConnectState(null);
       setDragState({ mode: 'IDLE', startX: 0, startY: 0 });
+  };
+
+  const screenToCanvas = (clientX: number, clientY: number) => {
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+
+    return {
+      x: (clientX - rect.left - transform.x) / transform.scale,
+      y: (clientY - rect.top - transform.y) / transform.scale
+    };
   };
 
   const handleFocusDataSource = () => {
@@ -237,15 +263,22 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
             const d = `M ${sx} ${sy} C ${sx + controlOffset} ${sy}, ${tx - controlOffset} ${ty}, ${tx} ${ty}`;
             
             const isFork = edge.type === 'fork';
+            const edgeStyle = edge.type === 'association'
+              ? { stroke: '#f59e0b', dash: '4,4', labelClass: 'text-amber-600 border-amber-100 bg-amber-50/90' }
+              : edge.type === 'causal'
+                ? { stroke: '#0f766e', dash: '0', labelClass: 'text-teal-700 border-teal-100 bg-teal-50/90' }
+                : edge.type === 'flow'
+                  ? { stroke: '#6366f1', dash: '0', labelClass: 'text-indigo-600 border-indigo-100 bg-indigo-50/90' }
+                  : { stroke: '#cbd5e1', dash: '6,4', labelClass: 'text-slate-400 border-slate-100 bg-white/90' };
 
             return (
               <g key={edge.id} className="group">
                  <path d={d} stroke="transparent" strokeWidth="15" fill="none" className="pointer-events-auto cursor-pointer" />
                  <path 
                     d={d}
-                    stroke={isFork ? "#cbd5e1" : "#94a3b8"}
+                    stroke={edgeStyle.stroke}
                     strokeWidth="2"
-                    strokeDasharray={isFork ? "6,4" : "0"}
+                    strokeDasharray={edgeStyle.dash}
                     fill="none"
                     markerEnd="url(#arrowhead)"
                     className={`transition-colors duration-200 group-hover:stroke-indigo-400 group-hover:stroke-[3px] ${isFork ? 'opacity-80' : ''}`}
@@ -253,7 +286,7 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
                   {edge.label && (
                       <foreignObject x={(sx+tx)/2 - 40} y={(sy+ty)/2 - 12} width="80" height="24">
                         <div className="flex justify-center items-center">
-                            <span className={`bg-white/80 backdrop-blur px-1.5 py-0.5 rounded text-[10px] text-slate-500 border border-slate-100 shadow-sm font-medium ${isFork ? 'text-slate-400 italic' : ''}`}>
+                            <span className={`backdrop-blur px-1.5 py-0.5 rounded text-[10px] border shadow-sm font-medium ${edgeStyle.labelClass} ${isFork ? 'italic' : ''}`}>
                                 {edge.label}
                             </span>
                         </div>
@@ -262,12 +295,35 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
               </g>
             );
           })}
+          {connectState && (() => {
+            const source = nodes.find(n => n.id === connectState.sourceId);
+            if (!source) return null;
+
+            const { x: tx, y: ty } = screenToCanvas(connectState.currentX, connectState.currentY);
+            const sx = source.x + source.width;
+            const sy = source.y + source.height / 2;
+            const dist = Math.hypot(tx - sx, ty - sy);
+            const controlOffset = Math.min(dist * 0.35, 120);
+            const d = `M ${sx} ${sy} C ${sx + controlOffset} ${sy}, ${tx - controlOffset} ${ty}, ${tx} ${ty}`;
+
+            return (
+              <path
+                d={d}
+                stroke="#6366f1"
+                strokeWidth="2"
+                strokeDasharray="6,4"
+                fill="none"
+                markerEnd="url(#arrowhead)"
+              />
+            );
+          })()}
         </svg>
 
         {/* Nodes Layer */}
         {nodes.map(node => (
             <div 
                 key={node.id}
+                data-node-id={node.id}
                 onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
                 style={{
                     position: 'absolute',
@@ -278,6 +334,32 @@ export const InfiniteCanvas: React.FC<InfiniteCanvasProps> = ({
                 }}
                 className="transition-shadow duration-200"
             >
+                {node.type === NodeType.INSIGHT && (
+                    <div className="pointer-events-none absolute -right-14 top-3 z-10 rounded-full border border-indigo-100 bg-white/90 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-indigo-400 shadow-sm">
+                        Note Link
+                    </div>
+                )}
+                <button
+                    type="button"
+                    className={`absolute -right-3 top-1/2 z-20 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border bg-white shadow-sm transition-colors ${
+                      node.type === NodeType.INSIGHT
+                        ? 'border-indigo-300 text-indigo-600 ring-2 ring-indigo-100 hover:border-indigo-500 hover:text-indigo-700'
+                        : 'border-indigo-200 text-indigo-500 hover:border-indigo-400 hover:text-indigo-700'
+                    }`}
+                    onMouseDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setConnectState({
+                            sourceId: node.id,
+                            currentX: e.clientX,
+                            currentY: e.clientY
+                        });
+                        onNodeSelect?.(node.id);
+                    }}
+                    title={node.type === NodeType.INSIGHT ? 'Connect this note as context' : 'Create connection'}
+                >
+                    <span className="h-2.5 w-2.5 rounded-full bg-current" />
+                </button>
                 {renderNode(node)}
             </div>
         ))}

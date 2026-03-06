@@ -1,7 +1,7 @@
 import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from gemini_service import (
+from ollama_service import (
     configure_genai,
     analyze_insight,
     generate_initial_eda,
@@ -85,7 +85,8 @@ def analyze_insight_api():
     data = request.json
     result = analyze_insight(
         data.get('insightText', ''),
-        data.get('lang', 'en')
+        data.get('lang', 'en'),
+        data.get('context')
     )
     return jsonify({"actions": result})
 

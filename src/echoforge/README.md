@@ -58,7 +58,7 @@ EchoForge now uses a local Python backend powered by Ollama for privacy and cont
 
 ## 5. Frontend Configuration
 
-The frontend (`src/echoforge/Gemini.ts`) is configured to communicate with the Python backend.
+The frontend (`src/echoforge/Ollama.ts`) is configured to communicate with the Python backend.
 
 -   **Dev Mode**: Defaults to `http://localhost:5000/api`.
 -   **Production**: Defaults to `/api` (requires a proxy).

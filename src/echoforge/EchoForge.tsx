@@ -1,11 +1,11 @@
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import './styles.css';
 import { InfiniteCanvas } from './InfiniteCanvas';
-import { CanvasNode, CanvasEdge, NodeType, VizType, VariableRole, NodeData, Language } from './types';
+import { CanvasNode, CanvasEdge, NodeType, VizType, VariableRole, Language, SuggestedAction, HistoryState, ChatMessage } from './types';
 import { DatasetNode, VisualizationNode, InsightNode, CausalGraphNode } from './NodeViews';
-import { generateInitialEDA, explainOutlier, generateCausalGraph, generateIdentificationStrategy, generateNotebook, generateAssumptionsReport, generateNodeCode, performSuggestedAction, analyzeInsight } from './Gemini';
-import { Plus, Play, History, GitCommit, Download, Sparkles, Upload, Maximize, Undo2, Redo2, FileText, X, Copy, Check, Languages, MousePointer2, GitBranch } from 'lucide-react';
+import { generateInitialEDA, explainOutlier, generateCausalGraph, generateIdentificationStrategy, generateNotebook, generateAssumptionsReport, generateNodeCode, performSuggestedAction, analyzeInsight, buildContextWithNotes, normalizeSuggestedActions, askNodeQuestion } from './Ollama';
+import { GitCommit, Download, Sparkles, Upload, Undo2, Redo2, FileText, Languages, MousePointer2, GitBranch, X, Copy, Check } from 'lucide-react';
 
 // Translation Dictionary for App.tsx
 const t = {
@@ -29,6 +29,12 @@ const t = {
     notebookTitle: { en: 'Reproducible Notebook (.qmd)', zh: '可复现 Notebook (.qmd)' },
     reportTitle: { en: 'Assumptions & Robustness Report', zh: '假设与稳健性报告' },
     nodeCodeTitle: { en: 'Node Code', zh: '节点代码' },
+    chatTitle: { en: 'Research Chat', zh: '研究对话' },
+    chatPlaceholder: { en: 'Ask about this node, its assumptions, or next steps...', zh: '提问这个节点、它的假设，或下一步分析...' },
+    chatSend: { en: 'Send', zh: '发送' },
+    chatEmpty: { en: 'No messages yet. Ask a concrete methodological question.', zh: '还没有消息。可以直接问一个方法论问题。' },
+    chatPin: { en: 'Pin Latest Reply', zh: '固定最新回复' },
+    staleAssociation: { en: 'Connected note changed', zh: '关联笔记已变化' },
     source: { en: 'Quarto / R Markdown Source', zh: 'Quarto / R Markdown 源码' },
     summary: { en: 'Research Assumptions Summary', zh: '研究假设摘要' },
     researchPreview: { en: 'AI-Powered Causal Workbench', zh: 'AI 驱动的因果推断工作台' },
@@ -36,6 +42,8 @@ const t = {
 };
 
 const INITIAL_NODES: CanvasNode[] = [];
+const MENTION_PATTERN = /@node-[a-zA-Z0-9-]+/g;
+const EXECUTION_EDGES: Array<CanvasEdge['type']> = ['causal', 'flow', 'fork'];
 
 // Simple histogram binning helper
 const calculateHistogram = (data: any[], key: string, bins = 20) => {
@@ -253,6 +261,104 @@ const ForkModal = ({
     );
 };
 
+const ChatModal = ({
+    isOpen,
+    onClose,
+    title,
+    messages,
+    inputValue,
+    onInputChange,
+    onSubmit,
+    onPinLatest,
+    loading,
+    language
+}: {
+    isOpen: boolean;
+    onClose: () => void;
+    title: string;
+    messages: ChatMessage[];
+    inputValue: string;
+    onInputChange: (value: string) => void;
+    onSubmit: () => void;
+    onPinLatest: () => void;
+    loading: boolean;
+    language: Language;
+}) => {
+    if (!isOpen) return null;
+
+    const latestAssistantReply = [...messages].reverse().find(message => message.role === 'assistant');
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+            <div className="flex h-[70vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+                <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-5 py-4">
+                    <div>
+                        <h2 className="font-semibold text-slate-800">{title}</h2>
+                        <p className="text-xs text-slate-500">{t.chatTitle[language]}</p>
+                    </div>
+                    <button onClick={onClose} className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600">
+                        <X size={18} />
+                    </button>
+                </div>
+
+                <div className="flex-1 space-y-3 overflow-auto bg-slate-50 px-5 py-4 custom-scrollbar">
+                    {messages.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-200 bg-white p-4 text-sm text-slate-400">
+                            {t.chatEmpty[language]}
+                        </div>
+                    ) : (
+                        messages.map(message => (
+                            <div
+                                key={message.id}
+                                className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${
+                                    message.role === 'user'
+                                        ? 'ml-auto bg-indigo-600 text-white'
+                                        : 'bg-white text-slate-700 border border-slate-200'
+                                }`}
+                            >
+                                {message.content}
+                            </div>
+                        ))
+                    )}
+                </div>
+
+                <div className="border-t border-slate-100 bg-white p-4">
+                    <div className="mb-3 flex items-center justify-end">
+                        <button
+                            onClick={onPinLatest}
+                            disabled={!latestAssistantReply || loading}
+                            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {t.chatPin[language]}
+                        </button>
+                    </div>
+                    <div className="flex items-end gap-3">
+                        <textarea
+                            value={inputValue}
+                            onChange={(e) => onInputChange(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    onSubmit();
+                                }
+                            }}
+                            placeholder={t.chatPlaceholder[language]}
+                            className="min-h-[84px] flex-1 resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none transition-all focus:border-indigo-300 focus:ring-2 focus:ring-indigo-500/20"
+                        />
+                        <button
+                            onClick={onSubmit}
+                            disabled={loading || !inputValue.trim()}
+                            className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {loading ? t.processing[language] : t.chatSend[language]}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 export default function App() {
   const [nodes, setNodes] = useState<CanvasNode[]>(INITIAL_NODES);
   const [edges, setEdges] = useState<CanvasEdge[]>([]);
@@ -267,15 +373,27 @@ export default function App() {
   });
 
   // History State
-  const [history, setHistory] = useState<{nodes: CanvasNode[], edges: CanvasEdge[]}[]>([]);
+  const [history, setHistory] = useState<HistoryState>({ past: [], future: [] });
   
   // Fork Modal State
   const [forkModalState, setForkModalState] = useState<{isOpen: boolean, nodeId: string | null}>({ isOpen: false, nodeId: null });
+  const [chatState, setChatState] = useState<{
+      isOpen: boolean;
+      nodeId: string | null;
+      title: string;
+      messages: ChatMessage[];
+      input: string;
+      loading: boolean;
+  }>({ isOpen: false, nodeId: null, title: '', messages: [], input: '', loading: false });
+  const insightAnalysisRequestRef = useRef<Record<string, number>>({});
 
   const handleForkConfirm = (reason: string, label: string) => {
       if (!forkModalState.nodeId) return;
-      
-      const rootId = forkModalState.nodeId;
+      forkBranchFromNode(forkModalState.nodeId, reason, label);
+      setForkModalState({ isOpen: false, nodeId: null });
+  };
+
+  const forkBranchFromNode = (rootId: string, reason: string, label: string) => {
       const rootNode = nodes.find(n => n.id === rootId);
       if (!rootNode) return;
 
@@ -323,6 +441,10 @@ export default function App() {
               data: {
                   ...original.data,
                   title: isRoot && label ? label : original.data.title, // Update title if label provided for root
+                  meta: {
+                      ...(original.data.meta || { model: 'manual', prompt: '', timestamp: new Date().toISOString() }),
+                      lastEdited: new Date().toISOString()
+                  },
                   forkMeta: isRoot ? {
                       parentId: rootId,
                       forkTimestamp: Date.now(),
@@ -362,19 +484,35 @@ export default function App() {
       saveHistory();
       setNodes(prev => [...prev, ...newNodes]);
       setEdges(prev => [...prev, ...newEdges]);
-      setForkModalState({ isOpen: false, nodeId: null });
   };
   
   const saveHistory = () => {
-      setHistory(prev => [...prev.slice(-9), { nodes: [...nodes], edges: [...edges] }]);
+      setHistory(prev => ({
+          past: [...prev.past.slice(-19), { nodes: [...nodes], edges: [...edges] }],
+          future: []
+      }));
   };
 
   const handleUndo = () => {
-      if (history.length === 0) return;
-      const last = history[history.length - 1];
+      if (history.past.length === 0) return;
+      const last = history.past[history.past.length - 1];
       setNodes(last.nodes);
       setEdges(last.edges);
-      setHistory(prev => prev.slice(0, -1));
+      setHistory(prev => ({
+          past: prev.past.slice(0, -1),
+          future: [{ nodes: [...nodes], edges: [...edges] }, ...prev.future].slice(0, 20)
+      }));
+  };
+
+  const handleRedo = () => {
+      if (history.future.length === 0) return;
+      const next = history.future[0];
+      setNodes(next.nodes);
+      setEdges(next.edges);
+      setHistory(prev => ({
+          past: [...prev.past, { nodes: [...nodes], edges: [...edges] }].slice(-20),
+          future: prev.future.slice(1)
+      }));
   };
 
   const toggleLanguage = () => {
@@ -408,13 +546,20 @@ export default function App() {
         title: "Manual Insight",
         subtitle: "User Note",
         insight: "Double click to edit this note.",
+        suggestedActions: [],
+        meta: {
+          model: 'manual',
+          prompt: '',
+          timestamp: new Date().toISOString()
+        }
       }
     };
     setNodes(prev => [...prev, newNode]);
   };
 
   const handleAiAssistantClick = () => {
-    alert("AI Assistant feature is under development.");
+    const selectedNode = nodes.find(node => node.selected);
+    openChat(selectedNode?.id || null);
   };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -498,11 +643,500 @@ export default function App() {
       }
   };
 
+  const getNodeTypeLabel = (nodeType: NodeType) => {
+    switch (nodeType) {
+      case NodeType.DATASET: return 'Dataset';
+      case NodeType.VISUALIZATION: return 'Visualization';
+      case NodeType.CAUSAL_GRAPH: return 'CausalGraph';
+      case NodeType.CODE: return 'Code';
+      case NodeType.INSIGHT:
+      default:
+        return 'Insight';
+    }
+  };
+
+  const extractMentionedNodeIds = (text?: string) =>
+    Array.from(new Set((text || '').match(MENTION_PATTERN)?.map(token => token.slice(1)) || []));
+
+  const getIncomingInsightNotes = (targetNodeId: string, excludeNodeId?: string) => {
+    const noteIds = new Set<string>();
+
+    edges.forEach(edge => {
+      if (edge.target !== targetNodeId || edge.source === excludeNodeId) {
+        return;
+      }
+
+      const sourceNode = nodes.find(n => n.id === edge.source);
+      if (
+        sourceNode &&
+        sourceNode.type === NodeType.INSIGHT &&
+        sourceNode.data.insight &&
+        sourceNode.data.insight.trim()
+      ) {
+        noteIds.add(sourceNode.id);
+      }
+    });
+
+    return nodes.filter(node => noteIds.has(node.id));
+  };
+
+  const getOutgoingAssociations = (sourceNodeId: string) =>
+    edges.filter(edge => edge.source === sourceNodeId && edge.type === 'association');
+
+  const getExecutionDescendants = (sourceNodeId: string) => {
+    const descendants = new Set<string>();
+    const queue = [sourceNodeId];
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      edges
+        .filter(edge => edge.source === current && EXECUTION_EDGES.includes(edge.type))
+        .forEach(edge => {
+          if (!descendants.has(edge.target)) {
+            descendants.add(edge.target);
+            queue.push(edge.target);
+          }
+        });
+    }
+
+    return Array.from(descendants);
+  };
+
+  const markNodesStale = (nodeIds: string[], reason: string, upstreamNodeIds: string[]) => {
+    if (nodeIds.length === 0) {
+      return;
+    }
+
+    const uniqueIds = new Set(nodeIds);
+    setNodes(prev => prev.map(node => {
+      if (!uniqueIds.has(node.id)) {
+        return node;
+      }
+
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          reactivity: {
+            isStale: true,
+            staleReason: reason,
+            upstreamNodeIds,
+            staleSince: new Date().toISOString()
+          }
+        }
+      };
+    }));
+  };
+
+  const clearNodeStale = (nodeId: string) => {
+    setNodes(prev => prev.map(node => node.id === nodeId ? {
+      ...node,
+      data: {
+        ...node.data,
+        reactivity: {
+          ...(node.data.reactivity || { upstreamNodeIds: [] }),
+          isStale: false,
+          staleReason: undefined,
+          staleSince: undefined
+        }
+      }
+    } : node));
+  };
+
+  const buildNodeContext = (
+    nodeId: string,
+    baseContext: string,
+    options?: { includeSelf?: boolean; excludeNodeId?: string }
+  ) => {
+    const connectedNotes = getIncomingInsightNotes(nodeId, options?.excludeNodeId)
+      .map(note => ({
+        id: note.id,
+        title: note.data.title,
+        insight: note.data.insight
+      }));
+
+    const selfNode = options?.includeSelf ? nodes.find(n => n.id === nodeId) : undefined;
+    if (
+      selfNode &&
+      selfNode.type === NodeType.INSIGHT &&
+      selfNode.id !== options?.excludeNodeId &&
+      selfNode.data.insight?.trim()
+    ) {
+      connectedNotes.unshift({
+        id: selfNode.id,
+        title: selfNode.data.title,
+        insight: selfNode.data.insight
+      });
+    }
+
+    return buildContextWithNotes(baseContext, connectedNotes);
+  };
+
+  const buildInsightAnalysisContext = (nodeId: string, insightText: string) => {
+    const currentNode = nodes.find(n => n.id === nodeId);
+    if (!currentNode) {
+      return insightText;
+    }
+
+    const linkedTargets = edges
+      .filter(edge => edge.source === nodeId)
+      .map(edge => nodes.find(n => n.id === edge.target))
+      .filter((node): node is CanvasNode => Boolean(node));
+
+    const mentionedTargets = extractMentionedNodeIds(insightText)
+      .map(id => nodes.find(n => n.id === id))
+      .filter((node): node is CanvasNode => Boolean(node));
+
+    const relatedTargets = Array.from(
+      new Map(
+        [...linkedTargets, ...mentionedTargets]
+          .filter(target => target.id !== nodeId)
+          .map(target => [target.id, target])
+      ).values()
+    );
+
+    const targetSummary = relatedTargets.length > 0
+      ? `\n\nLinked Nodes:\n${relatedTargets
+          .map(target => `- [${target.id}] ${target.data.title} (${getNodeTypeLabel(target.type)})`)
+          .join('\n')}`
+      : '';
+
+    return buildNodeContext(
+      nodeId,
+      `Current Note [${currentNode.data.title}]: ${insightText}${targetSummary}`,
+      { includeSelf: false, excludeNodeId: nodeId }
+    );
+  };
+
+  const buildCanvasContext = () => {
+    const summarizedNodes = nodes
+      .slice(0, 12)
+      .map(node => `- [${node.type}] ${node.data.title}: ${node.data.insight || node.data.subtitle || 'No summary'}`)
+      .join('\n');
+
+    return `Canvas Overview:\n${summarizedNodes || '- Empty canvas'}`;
+  };
+
+  const openChat = (nodeId: string | null) => {
+    const node = nodeId ? nodes.find(candidate => candidate.id === nodeId) : undefined;
+    const title = node
+      ? `${node.data.title} · ${t.chatTitle[language]}`
+      : `${language === 'zh' ? '全局画布' : 'Canvas'} · ${t.chatTitle[language]}`;
+
+    setChatState({
+      isOpen: true,
+      nodeId,
+      title,
+      messages: node?.data.chatThread || [],
+      input: '',
+      loading: false
+    });
+  };
+
+  const pinLatestChatReply = () => {
+    const latestAssistantReply = [...chatState.messages].reverse().find(message => message.role === 'assistant');
+    if (!latestAssistantReply) {
+      return;
+    }
+
+    const sourceNode = chatState.nodeId ? nodes.find(node => node.id === chatState.nodeId) : undefined;
+    const nodeWidth = 340;
+    const nodeHeight = 220;
+    const originX = sourceNode ? sourceNode.x + sourceNode.width + 60 : window.innerWidth / 2 - nodeWidth / 2;
+    const originY = sourceNode ? sourceNode.y : window.innerHeight / 2 - nodeHeight / 2;
+    const bestPos = findBestPosition(nodes, originX, originY, nodeWidth, nodeHeight);
+
+    const insightNode: CanvasNode = {
+      id: `chat-note-${Date.now()}`,
+      type: NodeType.INSIGHT,
+      x: bestPos.x,
+      y: bestPos.y,
+      width: nodeWidth,
+      height: nodeHeight,
+      data: {
+        title: sourceNode
+          ? `${sourceNode.data.title} · ${language === 'zh' ? '对话结论' : 'Chat Insight'}`
+          : (language === 'zh' ? '画布对话结论' : 'Canvas Chat Insight'),
+        subtitle: language === 'zh' ? 'Pinned from Research Chat' : 'Pinned from Research Chat',
+        insight: latestAssistantReply.content,
+        suggestedActions: [],
+        meta: {
+          model: 'ollama-local',
+          prompt: chatState.messages.map(message => `${message.role}: ${message.content}`).join('\n'),
+          timestamp: new Date().toISOString()
+        }
+      },
+      parentId: sourceNode?.id
+    };
+
+    const nextEdges = sourceNode ? [{
+      id: `edge-${sourceNode.id}-${insightNode.id}-${Date.now()}`,
+      source: sourceNode.id,
+      target: insightNode.id,
+      label: 'chat',
+      type: 'flow' as const
+    }] : [];
+
+    saveHistory();
+    setNodes(prev => [...prev, insightNode]);
+    if (nextEdges.length > 0) {
+      setEdges(prev => [...prev, ...nextEdges]);
+    }
+  };
+
+  const refreshVisualizationNode = async (node: CanvasNode) => {
+    if (!node.parentId) {
+      clearNodeStale(node.id);
+      return;
+    }
+
+    const parentNode = nodes.find(candidate => candidate.id === node.parentId);
+    const sourceData = parentNode?.data.chartData || [];
+    const xKey = node.data.xAxisKey || parentNode?.data.xAxisKey || 'x';
+    const yKey = node.data.yAxisKey || parentNode?.data.yAxisKey || 'y';
+
+    let chartData = node.data.chartData || [];
+    if (node.data.vizType === VizType.SCATTER) {
+      chartData = sourceData.map((row: any) => ({ ...row, x: row[xKey], y: row[yKey] }));
+    } else if (node.data.vizType === VizType.DISTRIBUTION) {
+      chartData = calculateHistogram(sourceData, xKey).map((row, index) => ({
+        id: `hist-${node.id}-${index}`,
+        ...row
+      }));
+    }
+
+    const context = buildNodeContext(node.id, `Visualization: ${node.data.title}\nAxes: ${xKey} vs ${yKey}`, { includeSelf: true });
+    const refreshedInsight = await askNodeQuestion(
+      context,
+      language === 'zh'
+        ? '根据更新后的连接笔记，重新解释这个可视化的因果方法学含义，并给出一个简短结论。'
+        : 'Reinterpret this visualization using the updated connected notes and provide a concise causal-methodological takeaway.',
+      language
+    );
+    const refreshedActions = await analyzeInsight(refreshedInsight, language, context);
+
+    setNodes(prev => prev.map(candidate => candidate.id === node.id ? {
+      ...candidate,
+      data: {
+        ...candidate.data,
+        chartData,
+        insight: refreshedInsight,
+        suggestedActions: normalizeSuggestedActions(refreshedActions),
+        meta: {
+          ...(candidate.data.meta || { model: 'ollama-local', prompt: context, timestamp: new Date().toISOString() }),
+          prompt: context,
+          timestamp: new Date().toISOString()
+        },
+        reactivity: {
+          ...(candidate.data.reactivity || { upstreamNodeIds: [node.parentId] }),
+          isStale: false,
+          staleReason: undefined,
+          staleSince: undefined
+        }
+      }
+    } : candidate));
+  };
+
+  const refreshCausalGraphNode = async (node: CanvasNode) => {
+    if (!node.parentId) {
+      clearNodeStale(node.id);
+      return;
+    }
+
+    const parentNode = nodes.find(candidate => candidate.id === node.parentId);
+    const sampleRow = parentNode?.data.chartData?.[0];
+    const columns = sampleRow ? Object.keys(sampleRow).filter(k => k !== 'id' && k !== 'x' && k !== 'y') : [];
+    const roles = parentNode?.data.variableRoles || node.data.variableRoles || {};
+    const context = buildNodeContext(node.id, `Dataset: ${parentNode?.data.title || node.data.title}.`, { includeSelf: true });
+    const dagResult = await generateCausalGraph(context, columns, roles, language);
+
+    setNodes(prev => prev.map(candidate => candidate.id === node.id ? {
+      ...candidate,
+      data: {
+        ...candidate.data,
+        title: dagResult.title || candidate.data.title,
+        variableRoles: roles,
+        causalEdges: dagResult.edges || candidate.data.causalEdges,
+        insight: dagResult.insight,
+        suggestedActions: normalizeSuggestedActions(dagResult.suggestedActions),
+        meta: {
+          ...(candidate.data.meta || { model: 'ollama-local', prompt: context, timestamp: new Date().toISOString() }),
+          prompt: context,
+          timestamp: new Date().toISOString(),
+          assumptions: dagResult.assumptions || candidate.data.meta?.assumptions
+        },
+        reactivity: {
+          ...(candidate.data.reactivity || { upstreamNodeIds: [node.parentId] }),
+          isStale: false,
+          staleReason: undefined,
+          staleSince: undefined
+        }
+      }
+    } : candidate));
+  };
+
+  const refreshEstimateNode = async (node: CanvasNode) => {
+    if (!node.parentId) {
+      clearNodeStale(node.id);
+      return;
+    }
+
+    const parentNode = nodes.find(candidate => candidate.id === node.parentId);
+    const roles = parentNode?.data.variableRoles || {};
+    const edgesList = parentNode?.data.causalEdges || [];
+    const datasetNode = parentNode?.parentId ? nodes.find(candidate => candidate.id === parentNode.parentId) : undefined;
+    const context = buildNodeContext(node.id, datasetNode ? `Dataset: ${datasetNode.data.title}` : 'Synthetic Data', { includeSelf: true });
+    const strategy = await generateIdentificationStrategy(context, roles, edgesList, language);
+
+    setNodes(prev => prev.map(candidate => candidate.id === node.id ? {
+      ...candidate,
+      data: {
+        ...candidate.data,
+        insight: strategy.insight,
+        adjustmentSet: strategy.adjustmentSet,
+        ate: strategy.ate,
+        ciLower: strategy.ciLower,
+        ciUpper: strategy.ciUpper,
+        pValue: strategy.pValue,
+        formula: strategy.formula,
+        method: strategy.method,
+        heterogeneity: strategy.heterogeneity,
+        meta: {
+          ...(candidate.data.meta || { model: 'ollama-local', prompt: context, timestamp: new Date().toISOString() }),
+          prompt: context,
+          timestamp: new Date().toISOString(),
+          assumptions: strategy.assumptions || candidate.data.meta?.assumptions
+        },
+        reactivity: {
+          ...(candidate.data.reactivity || { upstreamNodeIds: [node.parentId] }),
+          isStale: false,
+          staleReason: undefined,
+          staleSince: undefined
+        }
+      }
+    } : candidate));
+  };
+
+  const refreshNodeFromUpstream = async (node: CanvasNode) => {
+    if (node.type === NodeType.CAUSAL_GRAPH) {
+      await refreshCausalGraphNode(node);
+      return;
+    }
+
+    if (node.type === NodeType.VISUALIZATION) {
+      await refreshVisualizationNode(node);
+      return;
+    }
+
+    if (node.type === NodeType.INSIGHT && node.data.ate !== undefined) {
+      await refreshEstimateNode(node);
+      return;
+    }
+
+    if (node.type === NodeType.INSIGHT && node.data.insight) {
+      await handleNodeAction(node.id, 'analyze_insight', { insightText: node.data.insight, autoRunFirstAction: false });
+      return;
+    }
+
+    if (node.type === NodeType.DATASET) {
+      await handleNodeAction(node.id, 'analyze');
+    }
+  };
+
+  const routeSuggestedAction = async (node: CanvasNode, suggestedAction: SuggestedAction) => {
+    const actionLabel = suggestedAction.label.toLowerCase();
+
+    if (suggestedAction.kind === 'fork') {
+      forkBranchFromNode(node.id, suggestedAction.prompt || suggestedAction.label, suggestedAction.label);
+      return true;
+    }
+
+    if (node.type === NodeType.DATASET && /(dag|graph|confounder|backdoor|mediator|collider)/i.test(actionLabel)) {
+      await handleNodeAction(node.id, 'suggest_model');
+      return true;
+    }
+
+    if (node.type === NodeType.CAUSAL_GRAPH && /(estimate|ate|effect|positivity|counterfactual)/i.test(actionLabel)) {
+      await handleNodeAction(node.id, 'estimate_effect');
+      return true;
+    }
+
+    if (node.type === NodeType.INSIGHT && node.parentId && /(dag|graph|confounder|backdoor)/i.test(actionLabel)) {
+      await handleNodeAction(node.parentId, 'suggest_model');
+      return true;
+    }
+
+    return false;
+  };
+
+  const submitChatQuestion = async () => {
+    if (!chatState.input.trim()) {
+      return;
+    }
+
+    const userMessage: ChatMessage = {
+      id: `chat-user-${Date.now()}`,
+      role: 'user',
+      content: chatState.input.trim(),
+      timestamp: new Date().toISOString()
+    };
+
+    const nextMessages = [...chatState.messages, userMessage];
+    setChatState(prev => ({ ...prev, messages: nextMessages, input: '', loading: true }));
+
+    const chatNode = chatState.nodeId ? nodes.find(node => node.id === chatState.nodeId) : undefined;
+    const context = chatNode
+      ? buildNodeContext(
+          chatNode.id,
+          `Node: ${chatNode.data.title}\nInsight: ${chatNode.data.insight || ''}\nType: ${chatNode.type}`,
+          { includeSelf: true }
+        )
+      : buildCanvasContext();
+
+    try {
+      const answer = await askNodeQuestion(context, userMessage.content, language);
+      const assistantMessage: ChatMessage = {
+        id: `chat-assistant-${Date.now()}`,
+        role: 'assistant',
+        content: answer,
+        timestamp: new Date().toISOString()
+      };
+
+      setChatState(prev => ({
+        ...prev,
+        messages: [...prev.messages, assistantMessage],
+        loading: false
+      }));
+
+      if (chatNode) {
+        setNodes(prev => prev.map(node => node.id === chatNode.id ? {
+          ...node,
+          data: {
+            ...node.data,
+            chatThread: [...(node.data.chatThread || []), userMessage, assistantMessage],
+            meta: {
+              ...(node.data.meta || { model: 'ollama-local', prompt: context, timestamp: new Date().toISOString() }),
+              lastEdited: new Date().toISOString()
+            }
+          }
+        } : node));
+      }
+    } catch (error) {
+      const failureMessage: ChatMessage = {
+        id: `chat-assistant-error-${Date.now()}`,
+        role: 'assistant',
+        content: language === 'zh' ? '当前无法完成回答，请稍后重试。' : 'I could not answer that right now. Please try again.',
+        timestamp: new Date().toISOString()
+      };
+      setChatState(prev => ({ ...prev, messages: [...prev.messages, failureMessage], loading: false }));
+    }
+  };
+
   // -----------------------------------------------------------------
   // Node Actions
   // -----------------------------------------------------------------
   const handleNodeAction = async (nodeId: string, action: string, payload?: any) => {
-    if (['suggest_model', 'analyze', 'estimate_effect', 'delete'].includes(action)) {
+    if (['suggest_model', 'analyze', 'estimate_effect', 'delete', 'perform_suggested_action', 'refresh_from_upstream'].includes(action)) {
         saveHistory();
     }
     
@@ -513,6 +1147,12 @@ export default function App() {
 
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
+
+    if (action === 'refresh_from_upstream') {
+        await refreshNodeFromUpstream(node);
+        clearNodeStale(nodeId);
+        return;
+    }
 
     // --- VIEW CODE (Single Node) ---
     if (action === 'view_code') {
@@ -538,59 +1178,117 @@ export default function App() {
     // --- UPDATE INSIGHT ---
     if (action === 'update_insight') {
         const updatedInsight = payload as string;
+        const requestId = (insightAnalysisRequestRef.current[nodeId] || 0) + 1;
+        insightAnalysisRequestRef.current[nodeId] = requestId;
         setNodes(prev => prev.map(n => n.id === nodeId ? {
             ...n,
             data: { 
                 ...n.data, 
                 insight: updatedInsight,
+                suggestedActions: updatedInsight.trim().length > 10 ? n.data.suggestedActions : [],
+                analysisState: updatedInsight.trim().length > 10
+                    ? { status: 'analyzing', requestId }
+                    : { status: 'idle', requestId },
                 meta: {
                     ...(n.data.meta || { model: 'manual', prompt: '', timestamp: new Date().toISOString() }),
                     lastEdited: new Date().toISOString()
                 }
             }
         } : n));
+
+        const directlyAffected = getOutgoingAssociations(nodeId).map(edge => edge.target);
+        const downstreamAffected = directlyAffected.flatMap(targetId => [targetId, ...getExecutionDescendants(targetId)]);
+        markNodesStale(Array.from(new Set(downstreamAffected)), t.staleAssociation[language], [nodeId]);
         
         // Trigger analysis if insight is substantial
         if (updatedInsight.trim().length > 10) {
-            handleNodeAction(nodeId, 'analyze_insight', updatedInsight);
+            void handleNodeAction(nodeId, 'analyze_insight', {
+                insightText: updatedInsight,
+                autoRunFirstAction: false,
+                requestId
+            });
         }
         return;
     }
 
     // --- ANALYZE INSIGHT ---
     if (action === 'analyze_insight') {
-        const insightText = payload as string;
+        const payloadObj = typeof payload === 'string' ? { insightText: payload, autoRunFirstAction: false } : (payload || {});
+        const insightText = payloadObj.insightText as string;
+        const autoRunFirstAction = Boolean(payloadObj.autoRunFirstAction);
+        const requestId = Number(payloadObj.requestId || insightAnalysisRequestRef.current[nodeId] || 0);
         try {
-            setLoading(true);
-            setLoadingText(language === 'zh' ? '正在分析笔记...' : 'Analyzing note...');
-            const actions = await analyzeInsight(insightText, language);
-            if (actions && actions.length > 0) {
-                setNodes(prev => prev.map(n => n.id === nodeId ? {
-                    ...n,
-                    data: {
-                        ...n.data,
-                        suggestedActions: actions
+            setNodes(prev => prev.map(n => n.id === nodeId ? {
+                ...n,
+                data: {
+                    ...n.data,
+                    analysisState: { status: 'analyzing', requestId }
+                }
+            } : n));
+
+            const noteContext = buildInsightAnalysisContext(nodeId, insightText);
+            const actions = await analyzeInsight(insightText, language, noteContext);
+
+            if (insightAnalysisRequestRef.current[nodeId] !== requestId) {
+                return;
+            }
+
+            setNodes(prev => prev.map(n => n.id === nodeId ? {
+                ...n,
+                data: {
+                    ...n.data,
+                    suggestedActions: normalizeSuggestedActions(actions || []),
+                    analysisState: { status: 'ready', requestId },
+                    reactivity: {
+                      ...(n.data.reactivity || { upstreamNodeIds: [] }),
+                      isStale: false,
+                      staleReason: undefined,
+                      staleSince: undefined
                     }
-                } : n));
+                }
+            } : n));
+
+            if (autoRunFirstAction && actions && actions.length > 0) {
+                void handleNodeAction(nodeId, 'perform_suggested_action', actions[0]);
             }
         } catch (e) {
             console.error("Failed to analyze insight", e);
-        } finally {
-            setLoading(false);
+            if (insightAnalysisRequestRef.current[nodeId] !== requestId) {
+                return;
+            }
+
+            setNodes(prev => prev.map(n => n.id === nodeId ? {
+                ...n,
+                data: {
+                    ...n.data,
+                    analysisState: {
+                        status: 'error',
+                        requestId,
+                        error: language === 'zh' ? '无法分析当前笔记' : 'Could not analyze this note'
+                    }
+                }
+            } : n));
         }
         return;
     }
 
     // --- PERFORM SUGGESTED ACTION ---
     if (action === 'perform_suggested_action') {
-        const actionText = payload as string;
+        const suggestedAction = payload as SuggestedAction;
+        const actionText = suggestedAction.label;
+
+        if (await routeSuggestedAction(node, suggestedAction)) {
+            return;
+        }
+
         try {
             setLoading(true);
             setLoadingText(language === 'zh' ? '正在执行建议操作...' : 'Performing suggested action...');
             
-            // We can create a new Insight node or a new Visualization node based on the action
-            // For now, let's create a new Insight node that acts as a placeholder for the action result
-            const actionResult = await performSuggestedAction(`Context: ${node.data.title}\nInsight: ${node.data.insight}`, actionText, language);
+            const actionContext = buildNodeContext(nodeId, `Context: ${node.data.title}\nInsight: ${node.data.insight || ''}`, {
+                includeSelf: true
+            });
+            const actionResult = await performSuggestedAction(actionContext, actionText, language);
             
             const nodeWidth = 380;
             const nodeHeight = 200;
@@ -607,10 +1305,12 @@ export default function App() {
                     title: actionText,
                     subtitle: "AI Suggested Action",
                     insight: actionResult.insight || actionResult.result || (language === 'zh' ? "操作已执行。" : "Action performed."),
+                    suggestedActions: normalizeSuggestedActions(actionResult.suggestedActions),
                     meta: {
                         model: "ollama-local",
-                        prompt: actionText,
-                        timestamp: new Date().toISOString()
+                        prompt: actionContext,
+                        timestamp: new Date().toISOString(),
+                        assumptions: node.data.assumptions
                     }
                 },
                 parentId: node.id
@@ -626,6 +1326,7 @@ export default function App() {
             
             setNodes(prev => [...prev, newNode]);
             setEdges(prev => [...prev, edge]);
+            clearNodeStale(nodeId);
             
         } catch (e) {
             console.error("Failed to perform suggested action", e);
@@ -654,6 +1355,11 @@ export default function App() {
             selected: n.id === targetId
         })));
         setFocusedNodeId(targetId);
+        return;
+    }
+
+    if (action === 'ask_ai') {
+        openChat(nodeId);
         return;
     }
 
@@ -687,17 +1393,7 @@ export default function App() {
             const sampleRow = node.data.chartData?.[0];
             const columns = sampleRow ? Object.keys(sampleRow).filter(k => k !== 'id' && k !== 'x' && k !== 'y') : [];
             const roles = node.data.variableRoles || {};
-            let context = `Dataset: ${node.data.title}.`;
-
-            // Level 4: Include user notes in the prompt context
-            const userNotes = nodes
-                .filter(n => n.type === NodeType.INSIGHT && n.data.insight && n.data.meta?.lastEdited)
-                .map(n => `- ${n.data.insight}`)
-                .join("\n");
-                
-            if (userNotes) {
-                context += `\n\nUser Notes & Assumptions:\n${userNotes}`;
-            }
+            const context = buildNodeContext(nodeId, `Dataset: ${node.data.title}.`, { includeSelf: true });
 
             const dagResult = await generateCausalGraph(context, columns, roles, language);
 
@@ -718,7 +1414,17 @@ export default function App() {
                     variableRoles: roles,
                     causalEdges: dagResult.edges,
                     insight: dagResult.insight,
-                    suggestedActions: dagResult.suggestedActions
+                    suggestedActions: normalizeSuggestedActions(dagResult.suggestedActions),
+                    meta: {
+                        model: 'ollama-local',
+                        prompt: context,
+                        timestamp: new Date().toISOString(),
+                        assumptions: dagResult.assumptions || []
+                    },
+                    reactivity: {
+                        isStale: false,
+                        upstreamNodeIds: [node.id]
+                    }
                 },
                 parentId: node.id
             };
@@ -733,6 +1439,7 @@ export default function App() {
 
             setNodes(prev => [...prev, dagNode]);
             setEdges(prev => [...prev, edge]);
+            clearNodeStale(nodeId);
         } finally {
             setLoading(false);
         }
@@ -747,18 +1454,7 @@ export default function App() {
             const edgesList = node.data.causalEdges || [];
             
             const parentNode = nodes.find(n => n.id === node.parentId);
-            let context = parentNode ? `Dataset: ${parentNode.data.title}` : "Synthetic Data";
-            
-            // Level 4: Include user notes in the prompt context
-            const userNotes = nodes
-                .filter(n => n.type === NodeType.INSIGHT && n.data.insight && n.data.meta?.lastEdited)
-                .map(n => `- ${n.data.insight}`)
-                .join("\n");
-                
-            if (userNotes) {
-                context += `\n\nUser Notes & Assumptions:\n${userNotes}`;
-            }
-            
+            const context = buildNodeContext(nodeId, parentNode ? `Dataset: ${parentNode.data.title}` : "Synthetic Data", { includeSelf: true });
             const strategy = await generateIdentificationStrategy(context, roles, edgesList, language);
             
             const nodeWidth = 320;
@@ -784,7 +1480,17 @@ export default function App() {
                     formula: strategy.formula,
                     method: strategy.method,
                     heterogeneity: strategy.heterogeneity,
-                    suggestedActions: ["Refute Estimate", "Check Positivity", "View Counterfactuals"]
+                    suggestedActions: normalizeSuggestedActions(["Refute Estimate", "Check Positivity", "View Counterfactuals"]),
+                    meta: {
+                        model: 'ollama-local',
+                        prompt: context,
+                        timestamp: new Date().toISOString(),
+                        assumptions: strategy.assumptions || []
+                    },
+                    reactivity: {
+                        isStale: false,
+                        upstreamNodeIds: [node.id]
+                    }
                 },
                 parentId: node.id
             };
@@ -799,6 +1505,7 @@ export default function App() {
 
             setNodes(prev => [...prev, resultNode]);
             setEdges(prev => [...prev, edge]);
+            clearNodeStale(nodeId);
         } finally {
             setLoading(false);
         }
@@ -811,7 +1518,7 @@ export default function App() {
             setLoadingText(t.generatingPlan[language]);
             const sampleRow = node.data.chartData?.[0];
             const columns = sampleRow ? Object.keys(sampleRow).filter(k => k !== 'id' && k !== 'x' && k !== 'y') : [];
-            const context = `Dataset: ${node.data.title}. Description: ${node.data.insight}`;
+            const context = buildNodeContext(nodeId, `Dataset: ${node.data.title}. Description: ${node.data.insight || ''}`, { includeSelf: true });
             
             const suggestions = await generateInitialEDA(context, columns, language);
             const sourceData = node.data.chartData || [];
@@ -859,15 +1566,26 @@ export default function App() {
                     y: bestPos.y,
                     width: nodeWidth,
                     height: nodeHeight,
-                    data: {
-                        ...s,
-                        vizType: resolvedVizType,
-                        xAxisKey: xKey,
-                        yAxisKey: yKey,
-                        chartData: processedData
+                data: {
+                    ...s,
+                    vizType: resolvedVizType,
+                    xAxisKey: xKey,
+                    yAxisKey: yKey,
+                    chartData: processedData,
+                    suggestedActions: normalizeSuggestedActions(s.suggestedActions),
+                    meta: {
+                        model: 'ollama-local',
+                        prompt: context,
+                        timestamp: new Date().toISOString(),
+                        assumptions: s.assumptions || []
                     },
-                    parentId: node.id
-                };
+                    reactivity: {
+                        isStale: false,
+                        upstreamNodeIds: [node.id]
+                    }
+                },
+                parentId: node.id
+            };
                 newNodes.push(newNode);
                 tempNodes.push(newNode);
             });
@@ -882,21 +1600,11 @@ export default function App() {
 
             setNodes(prev => [...prev, ...newNodes]);
             setEdges(prev => [...prev, ...newEdges]);
+            clearNodeStale(nodeId);
         } finally {
             setLoading(false);
         }
     } 
-
-    if (action === 'ask_ai') {
-        setModalState({
-            isOpen: true,
-            title: language === 'zh' ? 'AI 助手 (开发中)' : 'AI Assistant (WIP)',
-            content: language === 'zh' 
-                ? '对话接口正在开发中。未来您可以在这里直接向 AI 提问关于此节点的具体问题（例如：“为什么这里异常？”、“如果 treatment +10% 会怎样？”）。' 
-                : 'Chat interface is under construction. In the future, you will be able to ask specific questions about this node here.',
-            type: 'report'
-        });
-    }
 
     if (action === 'point_click') {
         const { cx, cy, data: pointData } = payload;
@@ -911,7 +1619,11 @@ export default function App() {
         } : n));
 
         try {
-            const analysis = await explainOutlier(pointData, `Dataset: ${node.data.title}`, language);
+            const analysis = await explainOutlier(
+                pointData,
+                buildNodeContext(nodeId, `Dataset: ${node.data.title}`, { includeSelf: true }),
+                language
+            );
             
             // 2. Update popover with explanation
             setNodes(prev => prev.map(n => n.id === nodeId ? {
@@ -964,7 +1676,7 @@ export default function App() {
                 title: language === 'zh' ? "异常值诊断" : "Outlier Diagnosis",
                 subtitle: `Point (${popoverState.data.x || '?'}, ${popoverState.data.y || '?'})`,
                 insight: popoverState.explanation.insight,
-                suggestedActions: popoverState.explanation.suggestedActions,
+                suggestedActions: normalizeSuggestedActions(popoverState.explanation.suggestedActions),
                 meta: popoverState.explanation.meta
             },
             parentId: node.id
@@ -981,12 +1693,20 @@ export default function App() {
     }
 
     if (action === 'suggestion') {
-        const suggestionLabel = payload as string;
+        const suggestedAction = payload as SuggestedAction;
+        const suggestionLabel = suggestedAction.label;
+
+        if (await routeSuggestedAction(node, suggestedAction)) {
+            return;
+        }
+
         try {
             setLoading(true);
             setLoadingText(language === 'zh' ? `正在执行: ${suggestionLabel}...` : `Performing: ${suggestionLabel}...`);
             
-            const context = `Node: ${node.data.title}. Previous Insight: ${node.data.insight}.`;
+            const context = buildNodeContext(nodeId, `Node: ${node.data.title}. Previous Insight: ${node.data.insight || ''}.`, {
+                includeSelf: true
+            });
             const result = await performSuggestedAction(context, suggestionLabel, language);
             
             const nodeWidth = 300;
@@ -1004,7 +1724,13 @@ export default function App() {
                     title: result.title || suggestionLabel,
                     subtitle: "Follow-up Analysis",
                     insight: result.insight,
-                    suggestedActions: result.suggestedActions
+                    suggestedActions: normalizeSuggestedActions(result.suggestedActions),
+                    meta: {
+                        model: "ollama-local",
+                        prompt: context,
+                        timestamp: new Date().toISOString(),
+                        assumptions: node.data.assumptions
+                    }
                 },
                 parentId: node.id
             };
@@ -1019,13 +1745,26 @@ export default function App() {
 
             setNodes(prev => [...prev, newNode]);
             setEdges(prev => [...prev, edge]);
+            clearNodeStale(nodeId);
         } finally {
             setLoading(false);
         }
     }
     
     if (action === 'delete') {
-        // Recursive deletion of downstream nodes
+        const associationTargets = edges
+            .filter(e => e.source === nodeId && e.type === 'association')
+            .map(e => e.target);
+
+        if (associationTargets.length > 0) {
+            markNodesStale(
+                associationTargets.flatMap(targetId => [targetId, ...getExecutionDescendants(targetId)]),
+                language === 'zh' ? '关联笔记已删除' : 'Connected note was deleted',
+                [nodeId]
+            );
+        }
+
+        // Recursive deletion of downstream nodes, excluding association-only links
         const nodesToDelete = new Set<string>();
         const queue = [nodeId];
         
@@ -1035,7 +1774,7 @@ export default function App() {
                 nodesToDelete.add(current);
                 // Find children connected by edges where current is source
                 const children = edges
-                    .filter(e => e.source === current)
+                    .filter(e => e.source === current && e.type !== 'association')
                     .map(e => e.target);
                 queue.push(...children);
             }
@@ -1060,6 +1799,29 @@ export default function App() {
         case NodeType.INSIGHT: return <InsightNode {...props} />;
         case NodeType.CAUSAL_GRAPH: return <CausalGraphNode {...props} />;
         default: return <div className="p-4 bg-red-100 rounded">Unknown Node</div>;
+    }
+  };
+
+  const handleConnect = (sourceId: string, targetId: string) => {
+    if (sourceId === targetId || edges.some(edge => edge.source === sourceId && edge.target === targetId)) {
+        return;
+    }
+
+    const sourceNode = nodes.find(node => node.id === sourceId);
+    saveHistory();
+    setEdges(prev => [
+        ...prev,
+        {
+            id: `edge-${sourceId}-${targetId}-${Date.now()}`,
+            source: sourceId,
+            target: targetId,
+            label: sourceNode?.type === NodeType.INSIGHT ? 'note context' : 'association',
+            type: 'association'
+        }
+    ]);
+
+    if (sourceNode?.type === NodeType.INSIGHT) {
+        markNodesStale([targetId, ...getExecutionDescendants(targetId)], t.staleAssociation[language], [sourceId]);
     }
   };
 
@@ -1106,6 +1868,7 @@ export default function App() {
             renderNode={renderNode}
             onNodeMove={handleNodeMove}
             onNodeSelect={handleNodeSelect}
+            onConnect={handleConnect}
             focusedNodeId={focusedNodeId}
         />
         
@@ -1163,13 +1926,18 @@ export default function App() {
              {/* History Controls moved here */}
              <button 
                 onClick={handleUndo} 
-                disabled={history.length === 0}
+                disabled={history.past.length === 0}
                 className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-slate-50 disabled:opacity-30 transition-all"
                 title="Undo"
              >
                  <Undo2 size={18} />
              </button>
-             <button className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-slate-50 disabled:opacity-30 transition-all" disabled>
+             <button
+                onClick={handleRedo}
+                className="w-9 h-9 flex items-center justify-center rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-slate-50 disabled:opacity-30 transition-all"
+                disabled={history.future.length === 0}
+                title="Redo"
+             >
                  <Redo2 size={18} />
              </button>
         </div>
@@ -1198,6 +1966,19 @@ export default function App() {
             onClose={() => setForkModalState({ isOpen: false, nodeId: null })}
             onConfirm={handleForkConfirm}
             sourceNodeTitle={nodes.find(n => n.id === forkModalState.nodeId)?.data.title || 'Node'}
+        />
+
+        <ChatModal
+            isOpen={chatState.isOpen}
+            onClose={() => setChatState(prev => ({ ...prev, isOpen: false, loading: false }))}
+            title={chatState.title}
+            messages={chatState.messages}
+            inputValue={chatState.input}
+            onInputChange={(value) => setChatState(prev => ({ ...prev, input: value }))}
+            onSubmit={submitChatQuestion}
+            onPinLatest={pinLatestChatReply}
+            loading={chatState.loading}
+            language={language}
         />
       </div>
     </div>

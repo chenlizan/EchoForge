@@ -40,6 +40,23 @@ export interface CausalEdge {
   type: 'directed' | 'bi-directed';
 }
 
+export type SuggestedActionType = 'create_node' | 'fork';
+
+export interface SuggestedAction {
+  id: string;
+  label: string;
+  kind: SuggestedActionType;
+  prompt?: string;
+  createdAt?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
 export interface NodeData {
   title: string;
   subtitle?: string;
@@ -50,7 +67,7 @@ export interface NodeData {
   xAxisLabel?: string;
   yAxisLabel?: string;
   insight?: string; // Markdown content
-  suggestedActions?: string[];
+  suggestedActions?: SuggestedAction[];
   codeSnippet?: string; // Reproducible code (Python/R)
   
   // New Causal Props
@@ -73,7 +90,21 @@ export interface NodeData {
     prompt: string;
     seed?: number;
     timestamp: string;
+    assumptions?: string[];
     lastEdited?: string; // ISO string for user edits
+  };
+
+  analysisState?: {
+    status: 'idle' | 'analyzing' | 'ready' | 'error';
+    requestId?: number;
+    error?: string;
+  };
+
+  reactivity?: {
+    isStale: boolean;
+    staleReason?: string;
+    upstreamNodeIds?: string[];
+    staleSince?: string;
   };
   
   // Fork Metadata
@@ -95,6 +126,8 @@ export interface NodeData {
     explanation?: any;
     loading?: boolean;
   };
+
+  chatThread?: ChatMessage[];
 }
 
 export interface CanvasNode {

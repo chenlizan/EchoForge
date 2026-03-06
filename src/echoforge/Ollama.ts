@@ -1,4 +1,4 @@
-import { VariableRole, CausalEdge, Language, CanvasNode } from "./types";
+import { VariableRole, CausalEdge, Language, CanvasNode, SuggestedAction } from "./types";
 
 const IS_DEV = process.env.NODE_ENV === 'development';
 const API_BASE_URL = IS_DEV ? '/api' : 'http://127.0.0.1:5000/api';
@@ -18,10 +18,83 @@ async function callBackend(endpoint: string, payload: any) {
   return await response.json();
 }
 
-export async function analyzeInsight(insightText: string, lang: Language = 'en'): Promise<string[]> {
+export function buildContextWithNotes(
+  baseContext: string,
+  notes: Array<{ id: string; title?: string; insight?: string }>
+): string {
+  const sanitizedNotes = notes
+    .filter(note => note.insight && note.insight.trim())
+    .map(note => `- [${note.id}] ${note.title || 'Untitled Note'}: ${note.insight?.trim()}`);
+
+  if (sanitizedNotes.length === 0) {
+    return baseContext;
+  }
+
+  return `${baseContext}\n\nConnected Notes:\n${sanitizedNotes.join('\n')}`;
+}
+
+const FORK_HINTS = [
+  'fork',
+  'branch',
+  'variant',
+  'counterfactual',
+  'sensitivity branch',
+  '分叉',
+  '分支',
+  '派生',
+  '敏感性分支'
+];
+
+const slugifyAction = (value: string) =>
+  value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'action';
+
+export function normalizeSuggestedActions(actions?: Array<string | Partial<SuggestedAction>>): SuggestedAction[] {
+  if (!actions || actions.length === 0) {
+    return [];
+  }
+
+  return actions
+    .map((action, index) => {
+      if (typeof action === 'string') {
+        const normalizedLabel = action.trim();
+        if (!normalizedLabel) return null;
+
+        const kind = FORK_HINTS.some(hint => normalizedLabel.toLowerCase().includes(hint))
+          ? 'fork'
+          : 'create_node';
+
+        return {
+          id: `${slugifyAction(normalizedLabel)}-${index}`,
+          label: normalizedLabel,
+          kind,
+          prompt: normalizedLabel,
+          createdAt: new Date().toISOString()
+        } satisfies SuggestedAction;
+      }
+
+      if (!action?.label?.trim()) {
+        return null;
+      }
+
+      return {
+        id: action.id?.trim() || `${slugifyAction(action.label)}-${index}`,
+        label: action.label.trim(),
+        kind: action.kind === 'fork' ? 'fork' : 'create_node',
+        prompt: action.prompt?.trim() || action.label.trim(),
+        createdAt: action.createdAt || new Date().toISOString()
+      } satisfies SuggestedAction;
+    })
+    .filter((action): action is NonNullable<typeof action> => Boolean(action));
+}
+
+export async function analyzeInsight(insightText: string, lang: Language = 'en', context?: string): Promise<SuggestedAction[]> {
   try {
-    const result = await callBackend('/analyze-insight', { insightText, lang });
-    return result.actions || [];
+    const result = await callBackend('/analyze-insight', { insightText, lang, context });
+    return normalizeSuggestedActions(result.actions || []);
   } catch (e) {
     console.warn('Backend analyzeInsight failed:', e);
     return [];
@@ -51,7 +124,7 @@ export async function generateInitialEDA(context: string, columns: string[], lan
       insight: isZh
         ? `${outcome} 的分布分析。注意可能违反 OLS 假设的天花板效应或零膨胀。`
         : `Distribution analysis of ${outcome}. Watch for ceiling effects or zero-inflation that might violate OLS assumptions.`,
-      suggestedActions: isZh ? ['检查正态性', '对数变换'] : ['Check Normality', 'Log Transform']
+      suggestedActions: normalizeSuggestedActions(isZh ? ['检查正态性', '对数变换'] : ['Check Normality', 'Log Transform'])
     },
     {
       title: isZh ? `散点: ${treatment} vs ${outcome}` : `Scatter: ${treatment} vs ${outcome}`,
@@ -87,7 +160,7 @@ export async function generateCausalGraph(context: string, columns: string[], ro
     insight: isZh
       ? '由于 API 不可用，基于角色分配构建了基本 DAG。请手动添加混杂因素。'
       : 'Constructed a basic DAG based on role assignment due to API unavailability. Add confounders manually.',
-    suggestedActions: isZh ? ['添加混杂因素', '测试后门路径'] : ['Add Confounders', 'Test Backdoor Paths']
+    suggestedActions: normalizeSuggestedActions(isZh ? ['添加混杂因素', '测试后门路径'] : ['Add Confounders', 'Test Backdoor Paths'])
   };
 }
 
@@ -133,6 +206,18 @@ export async function performSuggestedAction(context: string, action: string, la
   } catch (e) {
     return { title: 'Error', insight: 'Could not perform action.' };
   }
+}
+
+export async function askNodeQuestion(context: string, question: string, lang: Language = 'en'): Promise<string> {
+  const result = await performSuggestedAction(
+    context,
+    lang === 'zh'
+      ? `请基于当前节点与上下文回答这个研究问题：${question}`
+      : `Answer this research question using the current node and its connected context: ${question}`,
+    lang
+  );
+
+  return result.insight || result.result || result.answer || (lang === 'zh' ? '暂时无法回答这个问题。' : 'Could not answer this question.');
 }
 
 export async function generateNotebook(nodes: CanvasNode[], lang: Language = 'en'): Promise<string> {

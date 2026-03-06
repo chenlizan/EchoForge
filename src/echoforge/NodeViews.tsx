@@ -1,13 +1,13 @@
 
-import React, { useState } from 'react';
-import { CanvasNode, NodeType, VizType, VariableRole, Language } from './types';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { CanvasNode, NodeType, VizType, VariableRole, Language, SuggestedAction } from './types';
 import { 
   ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, AreaChart, Area 
 } from 'recharts';
 import { 
   X, Copy, GitBranch, Activity, Table, Sparkles, MessageSquare, 
-  ArrowRight, ShieldAlert, Network, Play, Sliders, Calculator, FileText,
-  Circle, Check
+  ArrowRight, ShieldAlert, Network, Sliders, Calculator, FileText,
+  Check, Loader2, AlertTriangle, RefreshCcw
 } from 'lucide-react';
 
 interface NodeProps {
@@ -30,6 +30,7 @@ const t = {
     suggestedNext: { en: 'Suggested Next Step:', zh: '建议下一步:' },
     code: { en: 'Code', zh: '代码' },
     fork: { en: 'Fork', zh: '分叉' },
+    refresh: { en: 'Refresh', zh: '刷新' },
     observational: { en: 'Observational', zh: '观察性研究' },
     unassigned: { en: 'Unassigned', zh: '未分配' },
     treatment: { en: 'Treatment', zh: '处理变量' },
@@ -46,9 +47,14 @@ const t = {
     colliderDesc: { en: 'Influenced by both variables (Common Effect)', zh: '受两个变量共同影响的变量 (共同结果)' }
 };
 
+const mentionPattern = /(@node-[a-zA-Z0-9-]+|@\[[^\]]+\])/g;
+const inlineMarkdownPattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]]+\]\((https?:\/\/[^)\s]+)\))/g;
+
 // ----------------------------------------------------------------------
 // Base Node Frame
 // ----------------------------------------------------------------------
+const getSuggestedActionLabel = (action: SuggestedAction) => action.label;
+
 const NodeFrame: React.FC<{
   node: CanvasNode; 
   children: React.ReactNode; 
@@ -84,10 +90,26 @@ const NodeFrame: React.FC<{
     </div>
     
     {/* Fork Metadata Banner */}
-    {node.data.forkReason && (
+    {node.data.forkMeta?.forkReason && (
         <div className="bg-indigo-50/50 border-b border-indigo-100 px-3 py-1.5 flex items-center gap-2 text-[10px] text-indigo-600">
             <GitBranch size={10} className="shrink-0" />
-            <span className="font-medium truncate">Fork: {node.data.forkReason}</span>
+            <span className="font-medium truncate">Fork: {node.data.forkMeta.forkReason}</span>
+        </div>
+    )}
+
+    {node.data.reactivity?.isStale && (
+        <div className="bg-amber-50/80 border-b border-amber-100 px-3 py-1.5 flex items-center justify-between gap-2 text-[10px] text-amber-700">
+            <div className="flex min-w-0 items-center gap-2">
+                <RefreshCcw size={10} className="shrink-0" />
+                <span className="truncate">{node.data.reactivity.staleReason || (language === 'zh' ? '上游笔记已变化' : 'Upstream notes changed')}</span>
+            </div>
+            <button
+                type="button"
+                onClick={() => onAction('refresh_from_upstream')}
+                className="shrink-0 rounded border border-amber-200 bg-white px-1.5 py-0.5 font-medium text-amber-700 transition-colors hover:bg-amber-100"
+            >
+                {t.refresh[language]}
+            </button>
         </div>
     )}
 
@@ -105,6 +127,7 @@ const NodeFrame: React.FC<{
          )}
       </div>
       <div className="flex gap-2">
+         <button onClick={() => onAction('ask_ai')} className="hover:text-indigo-600 flex items-center gap-1 transition-colors"><MessageSquare size={10} /> AI</button>
          <button onClick={() => onAction('view_code')} className="hover:text-indigo-600 flex items-center gap-1 transition-colors"><Copy size={10} /> {t.code[language]}</button>
          <button onClick={() => onAction('fork')} className="hover:text-indigo-600 flex items-center gap-1 transition-colors"><GitBranch size={10} /> {t.fork[language]}</button>
       </div>
@@ -447,11 +470,11 @@ export const VisualizationNode: React.FC<NodeProps> = ({ node, onAction, languag
         <div className="px-3 py-2 flex flex-wrap gap-2 border-t border-slate-50">
           {node.data.suggestedActions.map((action, idx) => (
              <button 
-                key={idx} 
+                key={action.id || idx} 
                 className="text-[10px] bg-white text-slate-600 px-2 py-1 rounded-full border border-slate-200 hover:border-indigo-300 hover:text-indigo-600 transition-colors shadow-sm"
                 onClick={() => onAction('suggestion', action)}
              >
-               {action}
+               {getSuggestedActionLabel(action)}
              </button>
           ))}
         </div>
@@ -468,6 +491,37 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
     const [isEditing, setIsEditing] = useState(false);
     const [editValue, setEditValue] = useState(node.data.insight || '');
     const [showSaved, setShowSaved] = useState(false);
+    const [mentionQuery, setMentionQuery] = useState('');
+    const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
+    const [highlightedMentionIndex, setHighlightedMentionIndex] = useState(0);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    useEffect(() => {
+        if (!isEditing) {
+            setEditValue(node.data.insight || '');
+            setMentionQuery('');
+            setMentionRange(null);
+        }
+    }, [node.data.insight, isEditing]);
+
+    const mentionCandidates = useMemo(() => {
+        if (!mentionQuery.trim()) {
+            return [];
+        }
+
+        const normalized = mentionQuery.toLowerCase().trim();
+        return nodes
+            .filter(candidate => candidate.id !== node.id)
+            .filter(candidate =>
+                candidate.id.toLowerCase().includes(normalized) ||
+                (candidate.data.title || '').toLowerCase().includes(normalized)
+            )
+            .slice(0, 6);
+    }, [mentionQuery, nodes, node.id]);
+
+    useEffect(() => {
+        setHighlightedMentionIndex(0);
+    }, [mentionQuery]);
 
     const handleDoubleClick = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -485,18 +539,87 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (mentionCandidates.length > 0 && mentionRange) {
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setHighlightedMentionIndex(prev => (prev + 1) % mentionCandidates.length);
+                return;
+            }
+
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setHighlightedMentionIndex(prev => (prev - 1 + mentionCandidates.length) % mentionCandidates.length);
+                return;
+            }
+
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const candidate = mentionCandidates[highlightedMentionIndex];
+                if (candidate) {
+                    applyMention(candidate);
+                }
+                return;
+            }
+
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const candidate = mentionCandidates[highlightedMentionIndex];
+                if (candidate) {
+                    applyMention(candidate);
+                }
+                return;
+            }
+        }
+
         if (e.key === 'Escape') {
-            handleSave();
+            e.preventDefault();
+            setEditValue(node.data.insight || '');
+            setIsEditing(false);
         } else if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSave();
         }
     };
 
+    const updateMentionState = (value: string, caret: number) => {
+        const beforeCaret = value.slice(0, caret);
+        const match = beforeCaret.match(/(?:^|\s)@([^\s@]*)$/);
+
+        if (!match) {
+            setMentionQuery('');
+            setMentionRange(null);
+            return;
+        }
+
+        const token = match[1] || '';
+        const tokenStart = caret - token.length - 1;
+        setMentionQuery(token);
+        setMentionRange({ start: tokenStart, end: caret });
+    };
+
+    const applyMention = (candidate: CanvasNode) => {
+        if (!mentionRange) {
+            return;
+        }
+
+        const replacement = `@node-${candidate.id.replace(/^node-/, '')}`;
+        const nextValue = `${editValue.slice(0, mentionRange.start)}${replacement}${editValue.slice(mentionRange.end)}`;
+        const nextCaret = mentionRange.start + replacement.length;
+
+        setEditValue(nextValue);
+        setMentionQuery('');
+        setMentionRange(null);
+
+        requestAnimationFrame(() => {
+            if (textareaRef.current) {
+                textareaRef.current.focus();
+                textareaRef.current.setSelectionRange(nextCaret, nextCaret);
+            }
+        });
+    };
+
     const renderInsightWithMentions = (text: string) => {
         const normalize = (value: string) => value.toLowerCase().replace(/[\s_-]+/g, '');
-        const mentionPattern = /(@\[[^\]]+\]|@node-[a-zA-Z0-9-]+|@[^\s@#.,;:!?()[\]{}]+)/g;
-        const parts = text.split(mentionPattern);
 
         const resolveMention = (token: string) => {
             if (token.startsWith('@node-')) {
@@ -510,21 +633,15 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                 return nodes.find(n => normalize(n.data.title || '') === normalizedTitle);
             }
 
-            const title = token.slice(1).trim();
-            const normalizedTitle = normalize(title);
-            return nodes.find(n => normalize(n.data.title || '') === normalizedTitle);
+            return undefined;
         };
 
-        return parts.map((part, i) => {
-            if (!part.startsWith('@')) {
-                return <span key={i}>{part}</span>;
-            }
-
-            const targetNode = resolveMention(part);
+        const renderMentionToken = (token: string, key: string) => {
+            const targetNode = resolveMention(token);
             if (targetNode) {
                 return (
                     <span
-                        key={i}
+                        key={key}
                         className="text-indigo-600 bg-indigo-50 px-1 rounded cursor-pointer hover:bg-indigo-100 font-mono text-[10px] border border-indigo-100 transition-colors"
                         onClick={(e) => {
                             e.stopPropagation();
@@ -532,21 +649,149 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                         }}
                         title={`${language === 'zh' ? '点击跳转到' : 'Click to jump to'} ${targetNode.data.title || targetNode.id}`}
                     >
-                        {part}
+                        {token}
                     </span>
                 );
             }
 
             return (
                 <span
-                    key={i}
+                    key={key}
                     className="text-slate-400 bg-slate-50 px-1 rounded font-mono text-[10px] border border-slate-100 line-through"
                     title={language === 'zh' ? "无效引用" : "Invalid reference"}
                 >
-                    {part}
+                    {token}
                 </span>
             );
-        });
+        };
+
+        const renderInlineMarkdown = (segment: string, keyPrefix: string): React.ReactNode[] => {
+            const tokens = segment.split(inlineMarkdownPattern);
+
+            return tokens
+                .filter(token => token !== '')
+                .map((token, index) => {
+                    const key = `${keyPrefix}-md-${index}`;
+
+                    if (token.startsWith('`') && token.endsWith('`')) {
+                        return (
+                            <code key={key} className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[10px] text-slate-700">
+                                {token.slice(1, -1)}
+                            </code>
+                        );
+                    }
+
+                    if (token.startsWith('**') && token.endsWith('**')) {
+                        return <strong key={key} className="font-semibold text-slate-800">{token.slice(2, -2)}</strong>;
+                    }
+
+                    if (token.startsWith('*') && token.endsWith('*')) {
+                        return <em key={key} className="italic text-slate-700">{token.slice(1, -1)}</em>;
+                    }
+
+                    const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+                    if (linkMatch) {
+                        return (
+                            <a
+                                key={key}
+                                href={linkMatch[2]}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-sky-600 underline decoration-sky-300 underline-offset-2 hover:text-sky-700"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                {linkMatch[1]}
+                            </a>
+                        );
+                    }
+
+                    return <span key={key}>{token}</span>;
+                });
+        };
+
+        const renderInlineContent = (value: string, keyPrefix: string) => {
+            const parts = value.split(mentionPattern);
+
+            return parts
+                .filter(part => part !== '')
+                .map((part, index) => {
+                    const key = `${keyPrefix}-part-${index}`;
+                    if (part.startsWith('@')) {
+                        return renderMentionToken(part, key);
+                    }
+
+                    return <React.Fragment key={key}>{renderInlineMarkdown(part, key)}</React.Fragment>;
+                });
+        };
+
+        const lines = text.split('\n');
+        const blocks: React.ReactNode[] = [];
+
+        for (let i = 0; i < lines.length; i += 1) {
+            const line = lines[i];
+            const trimmed = line.trim();
+
+            if (!trimmed) {
+                blocks.push(<div key={`spacer-${i}`} className="h-2" />);
+                continue;
+            }
+
+            const headingMatch = trimmed.match(/^(#{1,3})\s+(.+)$/);
+            if (headingMatch) {
+                const level = headingMatch[1].length;
+                const headingClass =
+                    level === 1 ? 'text-sm font-semibold text-slate-900' :
+                    level === 2 ? 'text-[13px] font-semibold text-slate-800' :
+                    'text-xs font-semibold uppercase tracking-wide text-slate-500';
+
+                blocks.push(
+                    <div key={`heading-${i}`} className={headingClass}>
+                        {renderInlineContent(headingMatch[2], `heading-${i}`)}
+                    </div>
+                );
+                continue;
+            }
+
+            if (trimmed.startsWith('> ')) {
+                blocks.push(
+                    <blockquote key={`quote-${i}`} className="border-l-2 border-amber-200 pl-3 italic text-slate-500">
+                        {renderInlineContent(trimmed.slice(2), `quote-${i}`)}
+                    </blockquote>
+                );
+                continue;
+            }
+
+            if (/^[-*]\s+/.test(trimmed)) {
+                const items: string[] = [];
+                let cursor = i;
+
+                while (cursor < lines.length && /^[-*]\s+/.test(lines[cursor].trim())) {
+                    items.push(lines[cursor].trim().replace(/^[-*]\s+/, ''));
+                    cursor += 1;
+                }
+
+                blocks.push(
+                    <ul key={`list-${i}`} className="list-disc space-y-1 pl-4">
+                        {items.map((item, itemIndex) => (
+                            <li key={`list-${i}-${itemIndex}`} className="pl-0.5">
+                                {renderInlineContent(item, `list-${i}-${itemIndex}`)}
+                            </li>
+                        ))}
+                    </ul>
+                );
+
+                i = cursor - 1;
+                continue;
+            }
+
+            blocks.push(
+                <p key={`paragraph-${i}`} className="leading-relaxed text-slate-600">
+                    {renderInlineContent(line, `paragraph-${i}`)}
+                </p>
+            );
+        }
+
+        return blocks;
     };
 
     return (
@@ -555,6 +800,13 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                 className="p-4 prose prose-sm max-w-none text-slate-600 text-xs flex-1 flex flex-col relative"
                 onDoubleClick={handleDoubleClick}
              >
+                {!isEstimation && (
+                    <div className="mb-3 inline-flex items-center gap-1.5 self-start rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700">
+                        <span className="h-1.5 w-1.5 rounded-full bg-indigo-500" />
+                        {language === 'zh' ? '可连线到其他节点，作为研究上下文' : 'Link this note to downstream nodes as context'}
+                    </div>
+                )}
+
                 {/* Save Toast */}
                 {showSaved && (
                     <div className="absolute top-2 right-2 bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[10px] font-medium flex items-center gap-1 animate-in fade-in slide-in-from-top-2 duration-300 z-10">
@@ -567,27 +819,55 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                     <div className="mb-3 flex-1 flex flex-col">
                         <textarea
                             autoFocus
+                            ref={textareaRef}
                             className="w-full min-h-[100px] p-2 border border-indigo-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500/50 resize-none font-sans text-xs text-slate-700 bg-white overflow-hidden"
                             value={editValue}
                             onChange={(e) => {
                                 setEditValue(e.target.value);
+                                updateMentionState(e.target.value, e.target.selectionStart ?? e.target.value.length);
                                 e.target.style.height = 'auto';
                                 e.target.style.height = `${e.target.scrollHeight}px`;
                             }}
                             onFocus={(e) => {
+                                updateMentionState(e.target.value, e.target.selectionStart ?? e.target.value.length);
                                 e.target.style.height = 'auto';
                                 e.target.style.height = `${e.target.scrollHeight}px`;
+                            }}
+                            onClick={(e) => {
+                                const target = e.currentTarget;
+                                updateMentionState(target.value, target.selectionStart ?? target.value.length);
                             }}
                             onBlur={handleSave}
                             onKeyDown={handleKeyDown}
                             placeholder={language === 'zh' ? "输入笔记内容..." : "Enter note content..."}
                         />
+                        {mentionCandidates.length > 0 && mentionRange && (
+                            <div className="mt-2 rounded-lg border border-indigo-100 bg-white shadow-sm">
+                                {mentionCandidates.map((candidate, index) => (
+                                    <button
+                                        key={candidate.id}
+                                        type="button"
+                                        onMouseDown={(e) => {
+                                            e.preventDefault();
+                                            applyMention(candidate);
+                                        }}
+                                        className={`flex w-full items-center justify-between px-2 py-1.5 text-left text-[10px] transition-colors ${
+                                            highlightedMentionIndex === index ? 'bg-indigo-50 text-indigo-700' : 'text-slate-600 hover:bg-slate-50'
+                                        }`}
+                                    >
+                                        <span className="truncate font-medium">{candidate.data.title || candidate.id}</span>
+                                        <span className="ml-3 shrink-0 font-mono text-slate-400">@node-{candidate.id.replace(/^node-/, '')}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        )}
                         <div className="text-[9px] text-slate-400 mt-1 flex justify-between">
                             <span>{language === 'zh' ? "按 Esc 或点击外部保存，Shift+Enter 换行" : "Esc or click outside to save, Shift+Enter for new line"}</span>
+                            <span>{language === 'zh' ? "支持 Markdown 与 @node-id 引用" : "Supports Markdown and @node-id mentions"}</span>
                         </div>
                     </div>
                 ) : (
-                    <div className="whitespace-pre-wrap font-sans mb-3 cursor-text hover:bg-slate-50/50 rounded transition-colors -mx-2 p-2 flex-1">
+                    <div className="font-sans mb-3 cursor-text hover:bg-slate-50/50 rounded transition-colors -mx-2 p-2 flex-1 space-y-2">
                         {node.data.insight ? (
                             renderInsightWithMentions(node.data.insight)
                         ) : (
@@ -598,6 +878,20 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                     </div>
                 )}
                 
+                {node.data.analysisState?.status === 'analyzing' && (
+                    <div className="mb-3 inline-flex items-center gap-1.5 self-start rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-[10px] font-medium text-indigo-700">
+                        <Loader2 size={10} className="animate-spin" />
+                        {language === 'zh' ? '正在分析笔记' : 'Analyzing note'}
+                    </div>
+                )}
+
+                {node.data.analysisState?.status === 'error' && (
+                    <div className="mb-3 inline-flex items-center gap-1.5 self-start rounded-md border border-rose-200 bg-rose-50 px-2 py-1 text-[10px] font-medium text-rose-700">
+                        <AlertTriangle size={10} />
+                        {node.data.analysisState.error || (language === 'zh' ? '笔记分析失败' : 'Note analysis failed')}
+                    </div>
+                )}
+
                 {/* Estimation Results Block */}
                 {isEstimation && (
                     <div className="mt-3 border-t border-slate-100 pt-3">
@@ -687,7 +981,7 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                         <div className="flex flex-col gap-1.5">
                             {node.data.suggestedActions.map((action, i) => (
                                 <button 
-                                    key={i}
+                                    key={action.id || i}
                                     onClick={(e) => {
                                         e.stopPropagation();
                                         onAction('perform_suggested_action', action);
@@ -695,7 +989,10 @@ export const InsightNode: React.FC<NodeProps> = ({ node, nodes, onAction, langua
                                     className="text-left text-[10px] text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 p-1.5 rounded transition-colors flex items-center gap-1.5 group"
                                 >
                                     <ArrowRight size={10} className="text-indigo-400 group-hover:translate-x-0.5 transition-transform" />
-                                    <span className="flex-1 leading-tight">{action}</span>
+                                    <span className="flex-1 leading-tight">{getSuggestedActionLabel(action)}</span>
+                                    <span className="rounded-full bg-white/80 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-indigo-500">
+                                        {action.kind === 'fork' ? 'Fork' : 'Run'}
+                                    </span>
                                 </button>
                             ))}
                         </div>
