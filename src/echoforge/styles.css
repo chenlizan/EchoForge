@@ -1,0 +1,33 @@
+/* EchoForge Specific Styles */
+.echoforge-container {
+  margin: 0;
+  overflow: hidden;
+  background-color: #f8fafc;
+  font-family: 'Inter', system-ui, sans-serif;
+  width: 100%;
+  height: 100%;
+}
+
+.pattern-grid {
+  background-image: radial-gradient(#cbd5e1 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+/* Custom scrollbar for panels */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}

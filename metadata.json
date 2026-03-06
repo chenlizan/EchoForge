@@ -1,0 +1,5 @@
+{
+  "name": "EchoForge",
+  "description": "A research-grade, infinite bi-directional interactive canvas for causal inference and exploratory data analysis.",
+  "requestFramePermissions": []
+}
