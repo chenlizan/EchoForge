@@ -1,7 +1,3 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
-
 # EchoForge 产品使用说明书
 
 EchoForge 是一个面向因果分析与研究探索的可视化工作台。你可以把数据、图表、因果图、估计结果和人工笔记都放在同一张无限画布上，通过节点之间的关系逐步推进分析。
